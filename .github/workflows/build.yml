@@ -30,8 +30,8 @@ jobs:
                   applicationId 'com.pinskin.lsp'
                   minSdk 26
                   targetSdk 33
-                  versionCode 12
-                  versionName '1.11'
+                  versionCode 13
+                  versionName '1.12'
               }
               buildTypes {
                   release { minifyEnabled false }
@@ -158,6 +158,8 @@ jobs:
           public final class Cfg {
               public static final String MODULE_PKG = "com.pinskin.lsp";
               public static final String PREFS = "pinskin_prefs";
+              /** Версия кода модуля. Должна совпадать с versionName в app/build.gradle. SystemUI присылает её приложению. */
+              public static final String VERSION = "1.12";
 
               public static final String K_ENABLED = "enabled";
               public static final String K_SHAPE = "shape";          // 0 круг, 1 скруглённый, 2 квадрат
@@ -495,8 +497,10 @@ jobs:
                               }
                           }
                       }
-                      diag.edit().putLong("lastHit", System.currentTimeMillis())
-                              .putInt("hits", diag.getInt("hits", 0) + 1).apply();
+                      SharedPreferences.Editor ed = diag.edit().putLong("lastHit", System.currentTimeMillis())
+                              .putInt("hits", diag.getInt("hits", 0) + 1);
+                      if (arg != null) ed.putString("sysuiVer", arg);   // версия модуля, работающего в SystemUI
+                      ed.apply();
                   } else if (method.equals("ov")) {
                       diag.edit().putString("ov", arg == null ? "" : arg).apply();
                   } else if (method.equals("dump")) {
@@ -684,7 +688,7 @@ jobs:
                           try {
                               long n = SystemClock.uptimeMillis();
                               if (!(cached != null && n - cachedAt < 1500)) {
-                                  Bundle b = ctx.getContentResolver().call(URI, "cfg", null, null);
+                                  Bundle b = ctx.getContentResolver().call(URI, "cfg", Cfg.VERSION, null);
                                   if (b != null) { cached = Cfg.from(b); cachedAt = SystemClock.uptimeMillis(); fails = 0; }
                                   else bump();
                               }
@@ -1850,6 +1854,14 @@ jobs:
                   java.text.DateFormat f = java.text.DateFormat.getTimeInstance();
                   long lt = d.getLong("loadTime", 0), lh = d.getLong("lastHit", 0);
                   StringBuilder s = new StringBuilder();
+                  String sv = d.getString("sysuiVer", "");
+                  if (lh != 0 && !Cfg.VERSION.equals(sv)) {
+                      s.append("⚠ SystemUI работает со СТАРОЙ версией модуля (").append(sv.isEmpty() ? "ниже 1.12" : sv)
+                              .append("), а установлена ").append(Cfg.VERSION)
+                              .append(". Перезагрузи телефон: новые функции не заработают, пока SystemUI не перезапустится с новым модулем.\n");
+                  } else if (lh != 0) {
+                      s.append("• Версия модуля в SystemUI: ").append(sv).append(" (совпадает с установленной)\n");
+                  }
                   if (lt == 0) {
                       s.append("• SystemUI ещё не загружал модуль (проверь область действия в LSPosed и перезапусти SystemUI)\n");
                   } else {
@@ -2262,7 +2274,7 @@ jobs:
               private static String buildDump(ViewGroup root, View key, Class<?> keyCls) {
                   StringBuilder sb = new StringBuilder(2048);
                   android.util.DisplayMetrics dm = root.getResources().getDisplayMetrics();
-                  sb.append("экран ").append(dm.widthPixels).append('x').append(dm.heightPixels)
+                  sb.append("модуль v").append(Cfg.VERSION).append(", экран ").append(dm.widthPixels).append('x').append(dm.heightPixels)
                           .append(", плотность ").append(dm.density).append('\n');
                   sb.append("цепочка от кнопки к корню (граница в родителе, vis 0=видно, a=alpha, tr=сдвиг, sc=масштаб):\n");
                   View cur = key;
@@ -2489,13 +2501,8 @@ jobs:
                   private void collect(ViewGroup cont, View v) {
                       if (keyCls.isInstance(v)) {
                           float ea = effAlpha(v);
-                          if (ea < 0.05f) { faded++; return; }   // кнопки скрыты (экран блокировки, анимация закрытия PIN)
-                          // кнопка должна реально быть на экране: не за краем и не обрезана родителем больше чем наполовину
-                          if (!v.getGlobalVisibleRect(gvr)
-                                  || (long) gvr.width() * gvr.height() * 2L < (long) v.getWidth() * v.getHeight()) {
-                              offscreen++;
-                              return;
-                          }
+                          if (ea < 0.02f) { faded++; return; }   // кнопки скрыты (экран блокировки, анимация закрытия PIN)
+                          // строгая проверка «кнопка на экране» отключена: она могла прятать картинку на реальном PIN
                           shown++;
                           if (ea > maxA) maxA = ea;
                           tmp.set(0, 0, v.getWidth(), v.getHeight());
@@ -2525,7 +2532,7 @@ jobs:
                       faded = 0;
                       offscreen = 0;
                       collect(cont, cont);
-                      if (!any || uni.isEmpty()) { drawNote = "кнопки-цифры скрыты, картинка не рисуется (прозрачные " + faded + ", вне экрана " + offscreen + ")"; return; }
+                      if (!any || uni.isEmpty()) { drawNote = "кнопки-цифры скрыты, картинка не рисуется (прозрачные/невидимые " + faded + ")"; return; }
                       // ползунок «Прозрачность» кнопок не должен гасить картинку: считаем только появление/скрытие клавиатуры
                       float norm = Math.min(1f, maxA / Math.max(0.1f, f.opacity / 100f));
                       drawNote = "рисую (видно кнопок " + shown + ", появление " + Math.round(norm * 100) + "%)";
