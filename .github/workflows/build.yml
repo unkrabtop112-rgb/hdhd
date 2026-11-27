@@ -30,8 +30,8 @@ jobs:
                   applicationId 'com.pinskin.lsp'
                   minSdk 26
                   targetSdk 33
-                  versionCode 11
-                  versionName '1.10'
+                  versionCode 12
+                  versionName '1.11'
               }
               buildTypes {
                   release { minifyEnabled false }
@@ -499,6 +499,8 @@ jobs:
                               .putInt("hits", diag.getInt("hits", 0) + 1).apply();
                   } else if (method.equals("ov")) {
                       diag.edit().putString("ov", arg == null ? "" : arg).apply();
+                  } else if (method.equals("dump")) {
+                      diag.edit().putString("dump", arg == null ? "" : arg).putLong("dumpTime", System.currentTimeMillis()).apply();
                   } else if (method.equals("geom")) {
                       try {
                           String[] g = (arg == null ? "" : arg).split(",");
@@ -737,6 +739,16 @@ jobs:
                       XposedBridge.log(TAG + "hooked constructors of " + name);
                   }
                   if (hooked == 0) st.append("похожие классы: ").append(candidates(lpp));
+
+                  PinOverlay.dumpSink = new PinOverlay.DumpSink() {
+                      @Override public void send(final Context ctx, final String dump) {
+                          EX.execute(new Runnable() {
+                              @Override public void run() {
+                                  try { ctx.getContentResolver().call(URI, "dump", dump, null); } catch (Throwable ignored) { }
+                              }
+                          });
+                      }
+                  };
 
                   if (!keyClasses.isEmpty()) {
                       try {
@@ -1214,6 +1226,7 @@ jobs:
                   diagView.setLineSpacing(0, 1.15f);
                   cur.addView(diagView);
                   gbtn("Обновить диагностику", 0, v -> updateDiag());
+                  gbtn("Снимок клавиатуры (скопировать)", 0, v -> showDump());
 
                   card("Интерактивное превью");
                   previewCard = cur;
@@ -1805,6 +1818,32 @@ jobs:
                           .show();
               }
 
+              private void showDump() {
+                  SharedPreferences dp_ = Cfg.diag(this);
+                  String txt = dp_.getString("dump", "");
+                  long when = dp_.getLong("dumpTime", 0);
+                  final String shown = txt.isEmpty()
+                          ? "Данных нет. Открой ввод PIN на экране блокировки, подожди 5 секунд и нажми снова."
+                          : "снято в " + java.text.DateFormat.getTimeInstance().format(new java.util.Date(when)) + "\n" + txt;
+                  TextView body = tv(shown, 11, TEXT1, false);
+                  body.setTypeface(Typeface.MONOSPACE);
+                  body.setTextIsSelectable(true);
+                  body.setPadding(dp(16), dp(8), dp(16), dp(8));
+                  ScrollView sv = new ScrollView(this);
+                  sv.addView(body);
+                  new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+                          .setTitle("Снимок клавиатуры")
+                          .setView(sv)
+                          .setPositiveButton("Копировать", (dd, ww) -> {
+                              android.content.ClipboardManager cm =
+                                      (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                              if (cm != null) cm.setPrimaryClip(android.content.ClipData.newPlainText("keypad", shown));
+                              Toast.makeText(this, "Скопировано. Вставь в чат.", Toast.LENGTH_SHORT).show();
+                          })
+                          .setNegativeButton("Закрыть", null)
+                          .show();
+              }
+
               // ====================================================================== diagnostics
               private void updateDiag() {
                   SharedPreferences d = Cfg.diag(this);
@@ -2198,6 +2237,88 @@ jobs:
           public final class PinOverlay {
               private PinOverlay() {}
 
+              // --- снимок реальной клавиатуры для отладки (уходит в приложение, там его можно скопировать)
+              public interface DumpSink { void send(android.content.Context ctx, String dump); }
+              public static volatile DumpSink dumpSink;
+              private static long lastDumpAt;
+              private static boolean dumpScheduled;
+
+              private static void scheduleDump(final ViewGroup root, final View key, final Class<?> keyCls) {
+                  long now = SystemClock.uptimeMillis();
+                  if (dumpScheduled || dumpSink == null || now - lastDumpAt < 8000L) return;
+                  dumpScheduled = true;
+                  root.postDelayed(new Runnable() {
+                      @Override public void run() {
+                          dumpScheduled = false;
+                          lastDumpAt = SystemClock.uptimeMillis();
+                          try {
+                              DumpSink s = dumpSink;
+                              if (s != null) s.send(root.getContext(), buildDump(root, key, keyCls));
+                          } catch (Throwable ignored) { }
+                      }
+                  }, 1500L);
+              }
+
+              private static String buildDump(ViewGroup root, View key, Class<?> keyCls) {
+                  StringBuilder sb = new StringBuilder(2048);
+                  android.util.DisplayMetrics dm = root.getResources().getDisplayMetrics();
+                  sb.append("экран ").append(dm.widthPixels).append('x').append(dm.heightPixels)
+                          .append(", плотность ").append(dm.density).append('\n');
+                  sb.append("цепочка от кнопки к корню (граница в родителе, vis 0=видно, a=alpha, tr=сдвиг, sc=масштаб):\n");
+                  View cur = key;
+                  for (int i = 0; i < 14 && cur != null; i++) {
+                      sb.append(' ').append(i).append(' ').append(cur.getClass().getSimpleName())
+                              .append(" [").append(cur.getLeft()).append(',').append(cur.getTop()).append(',')
+                              .append(cur.getRight()).append(',').append(cur.getBottom()).append(']')
+                              .append(" vis=").append(cur.getVisibility())
+                              .append(" a=").append(Math.round(cur.getAlpha() * 100) / 100f)
+                              .append(" tr=").append(Math.round(cur.getTranslationX())).append(',').append(Math.round(cur.getTranslationY()))
+                              .append(" sc=").append(Math.round(cur.getScaleX() * 100) / 100f).append(',').append(Math.round(cur.getScaleY() * 100) / 100f);
+                      if (cur instanceof ViewGroup) sb.append(" clip=").append(((ViewGroup) cur).getClipChildren());
+                      sb.append('\n');
+                      ViewParent p = cur.getParent();
+                      cur = p instanceof View ? (View) p : null;
+                  }
+                  sb.append("кнопки (подпись, границы в корне с учётом масштаба, alpha, итоговая видимость, на экране):\n");
+                  dumpKeys(root, root, keyCls, sb);
+                  sb.append("блок по раскладке ").append(lastW).append('x').append(lastH)
+                          .append(", кнопка ").append(lastKeyW).append('x').append(lastKeyH).append('\n');
+                  if (sb.length() > 6000) sb.setLength(6000);
+                  return sb.toString();
+              }
+
+              private static void dumpKeys(ViewGroup root, View v, Class<?> keyCls, StringBuilder sb) {
+                  if (keyCls.isInstance(v)) {
+                      Rect r = new Rect(0, 0, v.getWidth(), v.getHeight());
+                      try { root.offsetDescendantRectToMyCoords(v, r); } catch (Throwable t) { r.setEmpty(); }
+                      Rect gv = new Rect();
+                      boolean on = v.getGlobalVisibleRect(gv);
+                      sb.append(" '").append(firstText(v)).append("' [").append(r.left).append(',').append(r.top).append(',')
+                              .append(r.right).append(',').append(r.bottom).append("] a=")
+                              .append(Math.round(v.getAlpha() * 100) / 100f).append(" eff=")
+                              .append(Math.round(effAlpha(v) * 100) / 100f).append(" vis=").append(v.getVisibility())
+                              .append(" onscreen=").append(on).append('\n');
+                  } else if (v instanceof ViewGroup) {
+                      ViewGroup g = (ViewGroup) v;
+                      for (int i = 0; i < g.getChildCount(); i++) dumpKeys(root, g.getChildAt(i), keyCls, sb);
+                  }
+              }
+
+              private static String firstText(View v) {
+                  if (v instanceof android.widget.TextView) {
+                      CharSequence t = ((android.widget.TextView) v).getText();
+                      return t == null ? "" : t.toString();
+                  }
+                  if (v instanceof ViewGroup) {
+                      ViewGroup g = (ViewGroup) v;
+                      for (int i = 0; i < g.getChildCount(); i++) {
+                          String s = firstText(g.getChildAt(i));
+                          if (!s.isEmpty()) return s;
+                      }
+                  }
+                  return "";
+              }
+
               private static String cachedB64 = "";
               private static Bitmap cachedBmp;
 
@@ -2335,6 +2456,7 @@ jobs:
                           + ", клавиш=" + count(cont, keyCls) + ", включено=" + cfg.ovEnabled
                           + ", картинка=" + (b != null ? b.getWidth() + "x" + b.getHeight()
                                   : (cfg.ovImage.isEmpty() ? "не выбрана" : "не декодируется"));
+                  scheduleDump(cont, key, keyCls);
                   h.invalidateSelf();
                   cont.invalidate();
               }
